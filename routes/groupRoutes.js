@@ -9,9 +9,15 @@ const {
   getGroupInvitations,
   resendInvitation,
   verifyInviteToken,
-  deleteGroup
+  deleteGroup,
+  getGroupBalanceSummary
 } = require('../controllers/groupController');
 const { getGroupExpenses } = require('../controllers/expenseController');
+const { 
+  getGroupMessages, 
+  createMessage, 
+  deleteMessage 
+} = require('../controllers/messageController');
 const { protect } = require('../middleware/auth');
 
 // Root routes
@@ -29,9 +35,15 @@ router.get('/:id', protect, getGroupDetails);
 router.post('/:id/invite', protect, inviteUserToGroup);
 router.get('/:id/expenses', protect, getGroupExpenses);
 router.delete('/:id', protect, deleteGroup);
+router.get('/:id/balance', protect, getGroupBalanceSummary);
 
 // New invitation related routes
 router.get('/:id/invitations', protect, getGroupInvitations);
 router.post('/:id/invite/resend/:inviteId', protect, resendInvitation);
+
+// Chat message routes
+router.get('/:id/messages', protect, getGroupMessages);
+router.post('/:id/messages', protect, createMessage);
+router.delete('/:groupId/messages/:messageId', protect, deleteMessage);
 
 module.exports = router; 

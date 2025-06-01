@@ -31,34 +31,98 @@ const getUserStats = async (req, res) => {
     // Count total expenses
     const totalExpenses = expenses.length;
     
-    // Calculate total owed and total owing across all groups
-    let totalOwed = 0;
-    let totalOwing = 0;
+    // Initialize cumulative stats
+    let totalYourShare = 0;
+    let totalYouPaid = 0;
+    let totalOthersPaidYou = 0;
+    let totalYouNeedToPay = 0;
+    let totalOthersYetToPay = 0;
     
-    // Process all groups to calculate balances
+    // Process all groups to calculate detailed balances
     for (const group of user.groups) {
       // Get all expenses for this group
       const groupExpenses = await Expense.find({ groupId: group._id })
         .populate('paidBy', 'name email')
         .populate('splits.user', 'name email');
       
-      // Calculate user's balance in this group
+      if (groupExpenses.length === 0) continue;
+      
+      // Calculate basic user balance in this group
       const { userOwes, userIsOwed } = calculateUserBalance(groupExpenses, userId);
       
-      // Add to totals (ensure numeric values with 2 decimal places)
-      totalOwed += parseFloat(userIsOwed.toFixed(2));
-      totalOwing += parseFloat(userOwes.toFixed(2));
+      // Add to the your share total
+      totalYourShare += userOwes;
+      
+      // Calculate how much you paid in this group
+      const youPaid = groupExpenses.reduce((total, expense) => {
+        if (expense.paidBy._id.toString() === userId.toString()) {
+          return total + expense.amount;
+        }
+        return total;
+      }, 0);
+      totalYouPaid += youPaid;
+      
+      totalOthersPaidYou = groupExpenses.filter(expense => 
+        expense.paidBy._id.toString() === userId.toString() &&
+        expense.splits.some(split => 
+          split.user._id.toString() !== userId.toString() && 
+          split.settled
+        )
+      ).reduce((total, expense) => {
+        const userSplit = expense.splits.find(split => 
+          split.user._id.toString() !== userId.toString() && 
+          split.settled
+        );
+        return total + (userSplit?.share || 0);
+      }, 0);
+      
+      // Calculate how much others still owe you in this group
+      const othersYetToPay = groupExpenses.filter(expense => 
+        expense.paidBy._id.toString() === userId.toString()
+      ).reduce((total, expense) => {
+        // Sum up all unsettled splits by others
+        const unsettledAmount = expense.splits.reduce((sum, split) => {
+          if (split.user._id.toString() !== userId.toString() && !split.settled) {
+            return sum + split.share;
+          }
+          return sum;
+        }, 0);
+        
+        return total + unsettledAmount;
+      }, 0);
+      totalOthersYetToPay += othersYetToPay;
+      
+      // Calculate how much you need to pay in this group
+      const youNeedToPay = groupExpenses.filter(expense => 
+        expense.paidBy._id.toString() !== userId.toString()
+      ).reduce((total, expense) => {
+        // Find your unsettled share
+        const userSplit = expense.splits.find(split => 
+          split.user._id.toString() === userId.toString() && 
+          !split.settled
+        );
+        
+        return total + (userSplit?.share || 0);
+      }, 0);
+      totalYouNeedToPay += youNeedToPay;
     }
     
     // Calculate overall balance (positive means user is owed money, negative means user owes money)
-    const overallBalance = parseFloat((totalOwed - totalOwing).toFixed(2));
+    const overallBalance = totalOthersYetToPay - totalYouNeedToPay;
+    
+    // Format all values to 2 decimal places
+    const formatValue = (value) => parseFloat(parseFloat(value).toFixed(2));
     
     res.json({
       totalGroups,
       totalExpenses,
-      totalOwed: parseFloat(totalOwed.toFixed(2)),
-      totalOwing: parseFloat(totalOwing.toFixed(2)),
-      overallBalance
+      totalOwed: formatValue(totalOthersYetToPay),
+      totalOwing: formatValue(totalYourShare),
+      totalPaid: formatValue(totalYouPaid),
+      othersPaidYou: formatValue(totalOthersPaidYou),
+      youNeedToPay: formatValue(totalYouNeedToPay),
+      othersYetToPay: formatValue(totalOthersYetToPay),
+      overallBalance: formatValue(overallBalance)
     });
   } catch (error) {
     console.error('Get user stats error:', error);

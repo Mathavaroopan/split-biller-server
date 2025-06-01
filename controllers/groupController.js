@@ -9,6 +9,7 @@ const { INVITE_TOKEN_EXPIRY } = require('../config/constants');
 const mongoose = require('mongoose');
 const Expense = require('../models/Expense');
 const jwt = require('jsonwebtoken');
+const { calculateUserBalance } = require('../utils/expenseCalculator');
 
 // @desc    Create a new group
 // @route   POST /api/groups
@@ -550,6 +551,131 @@ const deleteGroup = async (req, res) => {
   }
 };
 
+// @desc    Get balance summary for a specific group
+// @route   GET /api/groups/:id/balance
+// @access  Private
+const getGroupBalanceSummary = async (req, res) => {
+  try {
+    const groupId = req.params.id;
+    const userId = req.user._id;
+    
+    // Check if group exists
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+    
+    // Check if user is a member of the group
+    if (!group.members.includes(userId)) {
+      return res.status(403).json({ message: 'Not authorized to access this group' });
+    }
+    
+    // Get all expenses for this group
+    const expenses = await Expense.find({ groupId })
+      .populate('paidBy', 'name email')
+      .populate('splits.user', 'name email');
+    
+    if (!expenses || expenses.length === 0) {
+      return res.json({
+        yourShare: 0,
+        youPaid: 0,
+        othersPaidYou: 0,
+        youNeedToPay: 0,
+        othersYetToPay: 0
+      });
+    }
+    
+    // Calculate the user's balance in this group
+    const { userOwes, userIsOwed } = calculateUserBalance(expenses, userId);
+    
+    // Calculate how much you paid
+    const youPaid = expenses.reduce((total, expense) => {
+      if (expense.paidBy._id.toString() === userId.toString()) {
+        return total + expense.amount;
+      }
+      return total;
+    }, 0);
+    
+    // Calculate how much others paid you (settled amounts)
+    let othersPaidYou = 0;
+    
+    // 1. Add amounts from expenses where others paid and you settled your share
+    const othersPaidYouSettled = expenses.filter(expense => 
+      expense.paidBy._id.toString() !== userId.toString() &&
+      expense.splits.some(split => 
+        split.user._id.toString() === userId.toString() && 
+        split.settled
+      )
+    ).reduce((total, expense) => {
+      const userSplit = expense.splits.find(split => 
+        split.user._id.toString() === userId.toString() && 
+        split.settled
+      );
+      return total + (userSplit?.share || 0);
+    }, 0);
+    
+    // 2. Add amounts from expenses where you paid and others settled their share to you
+    const youPaidOthersSettled = expenses.filter(expense => 
+      expense.paidBy._id.toString() === userId.toString()
+    ).reduce((total, expense) => {
+      // Sum up all settled splits by others
+      const settledAmount = expense.splits.reduce((sum, split) => {
+        if (split.user._id.toString() !== userId.toString() && split.settled) {
+          return sum + split.share;
+        }
+        return sum;
+      }, 0);
+      
+      return total + settledAmount;
+    }, 0);
+    
+    // Combined total of both scenarios
+    othersPaidYou = othersPaidYouSettled + youPaidOthersSettled;
+    
+    // Calculate how much others still owe you
+    const othersYetToPay = expenses.filter(expense => 
+      expense.paidBy._id.toString() === userId.toString()
+    ).reduce((total, expense) => {
+      // Sum up all unsettled splits by others
+      const unsettledAmount = expense.splits.reduce((sum, split) => {
+        if (split.user._id.toString() !== userId.toString() && !split.settled) {
+          return sum + split.share;
+        }
+        return sum;
+      }, 0);
+      
+      return total + unsettledAmount;
+    }, 0);
+    
+    // Calculate how much you need to pay
+    const youNeedToPay = expenses.filter(expense => 
+      expense.paidBy._id.toString() !== userId.toString()
+    ).reduce((total, expense) => {
+      // Find your unsettled share
+      const userSplit = expense.splits.find(split => 
+        split.user._id.toString() === userId.toString() && 
+        !split.settled
+      );
+      
+      return total + (userSplit?.share || 0);
+    }, 0);
+    
+    // Format all values to 2 decimal places
+    const formatValue = (value) => parseFloat(parseFloat(value).toFixed(2));
+    
+    res.json({
+      yourShare: formatValue(userOwes),
+      youPaid: formatValue(youPaid),
+      othersPaidYou: formatValue(othersPaidYou),
+      youNeedToPay: formatValue(youNeedToPay),
+      othersYetToPay: formatValue(othersYetToPay)
+    });
+  } catch (error) {
+    console.error('Get group balance summary error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 module.exports = {
   createGroup,
   getUserGroups,
@@ -559,5 +685,6 @@ module.exports = {
   getGroupInvitations,
   resendInvitation,
   verifyInviteToken,
-  deleteGroup
+  deleteGroup,
+  getGroupBalanceSummary
 }; 
