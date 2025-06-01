@@ -14,6 +14,10 @@ const app = express();
 
 // Middleware
 app.use(cors());
+app.use(cors({
+  origin: 'https://split-biller-client.vercel.app', // Replace with your frontend URL
+  credentials: true // If you're using cookies or sessions
+}));
 app.use(express.json());
 
 // Log requests
