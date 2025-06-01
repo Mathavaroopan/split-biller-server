@@ -5,7 +5,10 @@ const {
   getUserGroups, 
   getGroupDetails, 
   inviteUserToGroup,
-  joinGroup
+  joinGroup,
+  getGroupInvitations,
+  resendInvitation,
+  verifyInviteToken
 } = require('../controllers/groupController');
 const { getGroupExpenses } = require('../controllers/expenseController');
 const { protect } = require('../middleware/auth');
@@ -17,10 +20,16 @@ router.get('/', protect, getUserGroups);
 // Special routes must come before param routes
 // Route for joining groups via invitation token
 router.get('/join/:token', joinGroup);
+// Route for verifying invitation token without joining
+router.get('/verify-invite/:token', verifyInviteToken);
 
 // Parameter-based routes 
 router.get('/:id', protect, getGroupDetails);
 router.post('/:id/invite', protect, inviteUserToGroup);
 router.get('/:id/expenses', protect, getGroupExpenses);
+
+// New invitation related routes
+router.get('/:id/invitations', protect, getGroupInvitations);
+router.post('/:id/invite/resend/:inviteId', protect, resendInvitation);
 
 module.exports = router; 

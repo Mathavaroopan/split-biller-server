@@ -15,87 +15,55 @@ const calculateSplits = (amount, splitType, users, splitDetails = {}) => {
     throw new Error('No users provided for split calculation');
   }
 
+  const splits = [];
+  
   switch (splitType) {
     case 'equal':
-      return calculateEqualSplit(amount, users);
+      const share = amount / users.length;
+      for (const userId of users) {
+        splits.push({
+          user: userId,
+          share: parseFloat(share.toFixed(2))
+        });
+      }
+      break;
     
     case 'percentage':
-      return calculatePercentageSplit(amount, splitDetails);
+      // For percentage splits, validate total is 100%
+      const totalPercentage = Object.values(splitDetails).reduce((sum, val) => sum + parseFloat(val), 0);
+      if (Math.abs(totalPercentage - 100) > 0.01) {
+        throw new Error('Total percentage must equal 100%');
+      }
+      
+      for (const userId in splitDetails) {
+        const percentage = parseFloat(splitDetails[userId]);
+        const share = (percentage / 100) * amount;
+        splits.push({
+          user: userId,
+          share: parseFloat(share.toFixed(2))
+        });
+      }
+      break;
     
     case 'exact':
-      return validateExactSplit(amount, splitDetails);
+      // For exact splits, validate total equals expense amount
+      const totalExact = Object.values(splitDetails).reduce((sum, val) => sum + parseFloat(val), 0);
+      if (Math.abs(totalExact - amount) > 0.01) {
+        throw new Error('Total of exact shares must equal expense amount');
+      }
+      
+      for (const userId in splitDetails) {
+        splits.push({
+          user: userId,
+          share: parseFloat(parseFloat(splitDetails[userId]).toFixed(2))
+        });
+      }
+      break;
     
     default:
-      throw new Error(`Invalid split type: ${splitType}`);
+      throw new Error('Invalid split type');
   }
-};
-
-const calculateEqualSplit = (amount, users) => {
-  const perUserAmount = parseFloat((amount / users.length).toFixed(2));
   
-  // Handle rounding errors by assigning the remaining cents to the first user
-  const splits = users.map((userId, index) => {
-    let share = perUserAmount;
-    
-    // If it's the first user and there's a rounding difference, add it
-    if (index === 0) {
-      const roundingDiff = amount - (perUserAmount * users.length);
-      if (roundingDiff !== 0) {
-        share = parseFloat((share + roundingDiff).toFixed(2));
-      }
-    }
-    
-    return { user: userId, share };
-  });
-  
-  return splits;
-};
-
-const calculatePercentageSplit = (amount, splitDetails) => {
-  let totalPercentage = 0;
-  const splits = [];
-
-  for (const userId in splitDetails) {
-    const percentage = splitDetails[userId];
-    
-    if (typeof percentage !== 'number' || percentage < 0) {
-      throw new Error(`Invalid percentage for user ${userId}`);
-    }
-    
-    totalPercentage += percentage;
-    
-    const share = parseFloat(((amount * percentage) / 100).toFixed(2));
-    splits.push({ user: userId, share });
-  }
-
-  // Verify total percentage is 100%
-  if (Math.abs(totalPercentage - 100) > 0.01) {
-    throw new Error(`Total percentage (${totalPercentage}%) must equal 100%`);
-  }
-
-  return splits;
-};
-
-const validateExactSplit = (amount, splitDetails) => {
-  let totalShares = 0;
-  const splits = [];
-
-  for (const userId in splitDetails) {
-    const share = splitDetails[userId];
-    
-    if (typeof share !== 'number' || share < 0) {
-      throw new Error(`Invalid share amount for user ${userId}`);
-    }
-    
-    totalShares += share;
-    splits.push({ user: userId, share });
-  }
-
-  // Verify total shares equals the expense amount
-  if (Math.abs(totalShares - amount) > 0.01) {
-    throw new Error(`Total shares (${totalShares}) must equal expense amount (${amount})`);
-  }
-
   return splits;
 };
 
@@ -188,4 +156,100 @@ const simplifyDebts = (balances) => {
   return transactions;
 };
 
-module.exports = { calculateSplits, calculateGroupBalances }; 
+/**
+ * Calculate a user's balance in a group
+ * @param {Array} expenses - Array of expense objects for the group
+ * @param {String} userId - ID of the user to calculate balance for
+ * @returns {Object} - Object with userOwes and userIsOwed values
+ */
+const calculateUserBalance = (expenses, userId) => {
+  let userOwes = 0;
+  let userIsOwed = 0;
+  
+  for (const expense of expenses) {
+    // If user paid for this expense
+    if (expense.paidBy._id.toString() === userId.toString()) {
+      userIsOwed += expense.amount;
+    }
+    
+    // Find user's share in this expense
+    const userSplit = expense.splits.find(split => 
+      split.user._id.toString() === userId.toString()
+    );
+    
+    if (userSplit) {
+      userOwes += userSplit.share;
+    }
+  }
+  
+  return { userOwes, userIsOwed };
+};
+
+/**
+ * Calculate simplified payment plan for a group
+ * @param {Object} balances - Object with user IDs as keys and balance amounts as values
+ * @returns {Array} - Array of payment objects { from, to, amount }
+ */
+const calculatePaymentPlan = (balances) => {
+  const payments = [];
+  
+  // Separate positive (creditors) and negative (debtors) balances
+  const creditors = [];
+  const debtors = [];
+  
+  for (const userId in balances) {
+    const balance = balances[userId];
+    
+    if (balance > 0) {
+      creditors.push({ userId, amount: balance });
+    } else if (balance < 0) {
+      debtors.push({ userId, amount: Math.abs(balance) });
+    }
+  }
+  
+  // Sort by amount (descending)
+  creditors.sort((a, b) => b.amount - a.amount);
+  debtors.sort((a, b) => b.amount - a.amount);
+  
+  // Create payments by matching debtors with creditors
+  let i = 0; // index for creditors
+  let j = 0; // index for debtors
+  
+  while (i < creditors.length && j < debtors.length) {
+    const creditor = creditors[i];
+    const debtor = debtors[j];
+    
+    // Calculate payment amount (minimum of what debtor owes and what creditor is owed)
+    const paymentAmount = Math.min(creditor.amount, debtor.amount);
+    
+    if (paymentAmount > 0) {
+      payments.push({
+        from: debtor.userId,
+        to: creditor.userId,
+        amount: parseFloat(paymentAmount.toFixed(2))
+      });
+    }
+    
+    // Update remaining amounts
+    creditor.amount -= paymentAmount;
+    debtor.amount -= paymentAmount;
+    
+    // Move to next creditor/debtor if their balance is settled
+    if (creditor.amount <= 0.01) {
+      i++;
+    }
+    
+    if (debtor.amount <= 0.01) {
+      j++;
+    }
+  }
+  
+  return payments;
+};
+
+module.exports = {
+  calculateSplits,
+  calculateGroupBalances,
+  calculateUserBalance,
+  calculatePaymentPlan
+}; 
