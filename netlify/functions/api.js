@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const connectDB = require('./config/db');
+const serverless = require('serverless-http');
+const connectDB = require('../../config/db');
 
 // Load environment variables
 dotenv.config();
@@ -23,12 +24,12 @@ app.use((req, res, next) => {
 });
 
 // Import routes
-const authRoutes = require('./routes/authRoutes');
-const userRoutes = require('./routes/userRoutes');
-const groupRoutes = require('./routes/groupRoutes');
-const expenseRoutes = require('./routes/expenseRoutes');
-const notificationRoutes = require('./routes/notificationRoutes');
-const invitationRoutes = require('./routes/invitationRoutes');
+const authRoutes = require('../../routes/authRoutes');
+const userRoutes = require('../../routes/userRoutes');
+const groupRoutes = require('../../routes/groupRoutes');
+const expenseRoutes = require('../../routes/expenseRoutes');
+const notificationRoutes = require('../../routes/notificationRoutes');
+const invitationRoutes = require('../../routes/invitationRoutes');
 
 // Mount routes
 app.use('/api/auth', authRoutes);
@@ -37,6 +38,11 @@ app.use('/api/groups', groupRoutes);
 app.use('/api/expenses', expenseRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/invitations', invitationRoutes);
+
+// Basic route for testing
+app.get('/', (req, res) => {
+  res.json({ message: 'Split-Biller API is running' });
+});
 
 // Catch-all route for undefined endpoints
 app.use('*', (req, res) => {
@@ -52,14 +58,5 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Promise Rejection:', err);
-  // Don't crash the server, just log the error
-}); 
+// Export the serverless function
+exports.handler = serverless(app); 

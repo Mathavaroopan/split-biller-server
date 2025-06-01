@@ -4,14 +4,23 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { calculateSplits } = require('../utils/expenseCalculator');
 const { convertCurrency } = require('../utils/currencyConverter');
-const { sendNotificationEmail } = require('../utils/emailService');
 
 // @desc    Add expense to group
 // @route   POST /api/expenses
 // @access  Private
 const addExpense = async (req, res) => {
   try {
-    const { title, amount, groupId, splitType, splits, category, notes, currency = 'USD' } = req.body;
+    const { 
+      title, 
+      amount, 
+      groupId, 
+      splitType, 
+      splits, 
+      category, 
+      notes, 
+      currency = 'USD',
+      selectedMembers = [] // New parameter for selected members only
+    } = req.body;
     
     // Validate required fields
     if (!title || !amount || !groupId || !splitType) {
@@ -34,8 +43,32 @@ const addExpense = async (req, res) => {
     // Handle different split types
     switch (splitType) {
       case 'equal':
-        // For equal splits, we need all members
-        processedSplits = calculateSplits(amount, splitType, group.members);
+        // For equal splits, we can either use all members or selected members
+        if (selectedMembers && selectedMembers.length > 0) {
+          // Verify all selected members belong to the group
+          for (const memberId of selectedMembers) {
+            if (!group.members.includes(memberId)) {
+              return res.status(400).json({ message: `User ${memberId} is not a member of this group` });
+            }
+          }
+          
+          // Calculate equal splits among selected members only
+          const members = selectedMembers;
+          processedSplits = members.map(memberId => ({
+            user: memberId,
+            share: parseFloat((amount / members.length).toFixed(2))
+          }));
+          
+          // Adjust for rounding errors - add remainder to the first member
+          const totalAllocated = processedSplits.reduce((sum, split) => sum + split.share, 0);
+          if (Math.abs(totalAllocated - amount) > 0.01) {
+            const remainder = amount - totalAllocated;
+            processedSplits[0].share = parseFloat((processedSplits[0].share + remainder).toFixed(2));
+          }
+        } else {
+          // Original behavior - split among all members
+          processedSplits = calculateSplits(amount, splitType, group.members);
+        }
         break;
         
       case 'percentage':
@@ -53,7 +86,21 @@ const addExpense = async (req, res) => {
         }
         
         // Calculate splits based on the provided details
-        processedSplits = calculateSplits(amount, splitType, group.members, splits);
+        processedSplits = Object.entries(splits).map(([userId, share]) => ({
+          user: userId,
+          share: splitType === 'percentage' 
+            ? parseFloat((amount * share / 100).toFixed(2)) 
+            : parseFloat(share)
+        }));
+        
+        // Adjust for rounding errors in percentage splits
+        if (splitType === 'percentage') {
+          const totalAllocated = processedSplits.reduce((sum, split) => sum + split.share, 0);
+          if (Math.abs(totalAllocated - amount) > 0.01) {
+            const remainder = amount - totalAllocated;
+            processedSplits[0].share = parseFloat((processedSplits[0].share + remainder).toFixed(2));
+          }
+        }
         break;
         
       default:
@@ -79,13 +126,15 @@ const addExpense = async (req, res) => {
       { $push: { expenses: expense._id } }
     );
     
-    // Create notifications for group members
+    // Create notifications for group members involved in the expense
     const notification = {
-      message: `${req.user.name} added a new expense "${title}" (${currency} ${amount}) to group "${group.name}"`,
+      message: `${req.user.username} added a new expense "${title}" (${currency} ${amount}) to group "${group.name}"`,
     };
     
-    const notificationPromises = group.members
-      .filter(memberId => memberId.toString() !== req.user._id.toString())
+    const involvedMemberIds = processedSplits.map(split => split.user.toString());
+    
+    const notificationPromises = involvedMemberIds
+      .filter(memberId => memberId !== req.user._id.toString())
       .map(memberId => 
         Notification.create({
           userId: memberId,
@@ -94,20 +143,6 @@ const addExpense = async (req, res) => {
       );
     
     await Promise.all(notificationPromises);
-    
-    // Send email notifications (simulated)
-    const memberEmails = await User.find(
-      { _id: { $in: group.members, $ne: req.user._id } },
-      'email'
-    );
-    
-    memberEmails.forEach(({ email }) => {
-      sendNotificationEmail(
-        email,
-        `New Expense in ${group.name}`,
-        notification.message
-      );
-    });
     
     res.status(201).json(expense);
   } catch (error) {
@@ -210,9 +245,152 @@ const convertCurrencyAmount = async (req, res) => {
   }
 };
 
+// @desc    Get all expenses for current user across all groups
+// @route   GET /api/expenses
+// @access  Private
+const getAllUserExpenses = async (req, res) => {
+  try {
+    // Get all groups the user is a member of
+    const userGroups = await Group.find({ members: req.user._id }).select('_id name');
+    
+    if (userGroups.length === 0) {
+      return res.json([]);
+    }
+    
+    // Get all group IDs
+    const groupIds = userGroups.map(group => group._id);
+    
+    // Find all expenses from these groups
+    const expenses = await Expense.find({ groupId: { $in: groupIds } })
+      .populate('paidBy', 'name email')
+      .populate('splits.user', 'name email')
+      .populate('groupId', 'name') // Include group name
+      .sort({ createdAt: -1 });
+      
+    res.json(expenses);
+  } catch (error) {
+    console.error('Get all user expenses error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// @desc    Mark a user's share of an expense as settled
+// @route   POST /api/expenses/:id/settle
+// @access  Private
+const settleExpense = async (req, res) => {
+  try {
+    const expenseId = req.params.id;
+    const { userId } = req.body; // User who is settling up (if admin is marking on behalf of someone)
+    
+    // Find the expense
+    const expense = await Expense.findById(expenseId);
+    if (!expense) {
+      return res.status(404).json({ message: 'Expense not found' });
+    }
+    
+    // Determine which user is settling (either current user or specified userId)
+    const settlingUserId = userId || req.user._id.toString();
+    
+    // Check if the settling user is part of the expense
+    const splitIndex = expense.splits.findIndex(
+      split => split.user.toString() === settlingUserId
+    );
+    
+    if (splitIndex === -1) {
+      return res.status(400).json({ message: 'User is not part of this expense' });
+    }
+    
+    // Mark as settled
+    expense.splits[splitIndex].settled = true;
+    expense.splits[splitIndex].settledAt = new Date();
+    
+    await expense.save();
+    
+    // Create notification for the user who paid
+    if (expense.paidBy.toString() !== settlingUserId) {
+      const settlingUser = await User.findById(settlingUserId);
+      
+      await Notification.create({
+        userId: expense.paidBy,
+        message: `${settlingUser.name} has settled their share of expense "${expense.title}" (${expense.splits[splitIndex].share})`
+      });
+    }
+    
+    res.json({ 
+      message: 'Expense marked as settled',
+      expense
+    });
+  } catch (error) {
+    console.error('Settle expense error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// @desc    Mark a specific split as settled
+// @route   POST /api/expenses/:id/settle-split
+// @access  Private
+const settleSplit = async (req, res) => {
+  try {
+    const expenseId = req.params.id;
+    const { userId } = req.body; // The user whose split is being settled
+    
+    if (!userId) {
+      return res.status(400).json({ message: 'Please provide userId for the split to settle' });
+    }
+    
+    // Find the expense
+    const expense = await Expense.findById(expenseId);
+    if (!expense) {
+      return res.status(404).json({ message: 'Expense not found' });
+    }
+    
+    // Verify that the current user is the one who paid for the expense
+    if (expense.paidBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Only the expense creator can mark splits as settled' });
+    }
+    
+    // Find the specific split to settle
+    const splitIndex = expense.splits.findIndex(
+      split => split.user.toString() === userId
+    );
+    
+    if (splitIndex === -1) {
+      return res.status(404).json({ message: 'User split not found in this expense' });
+    }
+    
+    // Check if already settled
+    if (expense.splits[splitIndex].settled) {
+      return res.status(400).json({ message: 'This split is already settled' });
+    }
+    
+    // Mark as settled
+    expense.splits[splitIndex].settled = true;
+    expense.splits[splitIndex].settledAt = new Date();
+    
+    await expense.save();
+    
+    // Create notification for the user whose split was settled
+    await Notification.create({
+      userId: userId,
+      message: `${req.user.name} has marked your payment for expense "${expense.title}" (${expense.currency} ${expense.splits[splitIndex].share.toFixed(2)}) as settled`
+    });
+    
+    res.json({ 
+      message: 'Split marked as settled',
+      expense
+    });
+  } catch (error) {
+    console.error('Settle split error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 module.exports = {
   addExpense,
   getGroupExpenses,
   deleteExpense,
-  convertCurrencyAmount
+  convertCurrencyAmount,
+  getAllUserExpenses,
+  settleExpense,
+  settleSplit
 }; 

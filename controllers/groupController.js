@@ -1,11 +1,14 @@
 const Group = require('../models/Group');
 const User = require('../models/User');
 const InviteToken = require('../models/InviteToken');
+const Invitation = require('../models/Invitation');
 const Notification = require('../models/Notification');
 const { generateInviteToken } = require('../utils/generateToken');
 const { sendInviteEmail } = require('../utils/emailService');
 const { INVITE_TOKEN_EXPIRY } = require('../config/constants');
 const mongoose = require('mongoose');
+const Expense = require('../models/Expense');
+const jwt = require('jsonwebtoken');
 
 // @desc    Create a new group
 // @route   POST /api/groups
@@ -144,11 +147,34 @@ const inviteUserToGroup = async (req, res) => {
     // Send email with the personalized message if provided
     await sendInviteEmail(
       email,
-      req.user.name,
+      req.user.username,
       group.name,
       inviteLink,
       message // Optional personalized message
     );
+    
+    // If the invited user already exists in the system, create an in-app invitation
+    if (existingUser) {
+      // Create an in-app invitation for the user
+      await Invitation.create({
+        email,
+        groupId,
+        invitedBy: req.user._id,
+        status: 'pending',
+        message,
+        expiresAt
+      });
+      
+      // Also create a notification for the user
+      await Notification.create({
+        userId: existingUser._id,
+        message: `${req.user.name} invited you to join group "${group.name}"`,
+        relatedResource: {
+          resourceType: 'invitation',
+          resourceId: groupId
+        }
+      });
+    }
     
     res.status(200).json({ 
       message: 'Invitation sent successfully',
@@ -289,7 +315,7 @@ const resendInvitation = async (req, res) => {
       
       await sendInviteEmail(
         updatedInvite.email,
-        req.user.name,
+        req.user.username,
         group.name,
         inviteLink
       );
@@ -381,9 +407,22 @@ const joinGroup = async (req, res) => {
       { $push: { groups: group._id } }
     );
     
+    // Update any associated in-app invitation
+    const inAppInvitation = await Invitation.findOne({
+      email: invite.email,
+      groupId: invite.groupId,
+      status: 'pending'
+    });
+    
+    if (inAppInvitation) {
+      inAppInvitation.status = 'accepted';
+      inAppInvitation.acceptedAt = new Date();
+      await inAppInvitation.save();
+    }
+    
     // Create notification for group members
     const notification = {
-      message: `${user.name} has joined the group "${group.name}"`,
+      message: `${user.username} has joined the group "${group.name}"`,
     };
     
     for (const memberId of group.members) {
@@ -438,6 +477,22 @@ const verifyInviteToken = async (req, res) => {
     // Check if user already has an account
     const existingUser = await User.findOne({ email: invite.email });
     
+    // Check if there's an in-app invitation and update its status
+    if (existingUser) {
+      // Find any matching in-app invitation
+      const inAppInvitation = await Invitation.findOne({
+        email: invite.email,
+        groupId: invite.groupId,
+        status: 'pending'
+      });
+      
+      if (inAppInvitation) {
+        // Update the status to 'accepted' or handle as needed
+        // We won't actually accept it here since the user needs to complete the join process
+        console.log(`Found in-app invitation for user ${existingUser.email} to group ${group.name}`);
+      }
+    }
+    
     res.json({
       email: invite.email,
       groupId: group._id,
@@ -450,6 +505,51 @@ const verifyInviteToken = async (req, res) => {
   }
 };
 
+// @desc    Delete a group
+// @route   DELETE /api/groups/:id
+// @access  Private
+const deleteGroup = async (req, res) => {
+  try {
+    const groupId = req.params.id;
+    
+    // Check if group exists
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found' });
+    }
+    
+    // Check if user is the creator of the group
+    if (group.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to delete this group' });
+    }
+    
+    // Delete all expenses associated with this group
+    await Expense.deleteMany({ groupId });
+    
+    // Delete all email invitations associated with this group
+    await InviteToken.deleteMany({ groupId });
+    
+    // Delete all in-app invitations associated with this group
+    await Invitation.deleteMany({ groupId });
+    
+    // Remove group from members' groups array
+    for (const memberId of group.members) {
+      await User.findByIdAndUpdate(
+        memberId,
+        { $pull: { groups: groupId } }
+      );
+    }
+    
+    // Delete the group
+    await Group.findByIdAndDelete(groupId);
+    
+    res.status(200).json({ message: 'Group deleted successfully' });
+  } catch (error) {
+    console.error('Delete group error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 module.exports = {
   createGroup,
   getUserGroups,
@@ -458,5 +558,6 @@ module.exports = {
   joinGroup,
   getGroupInvitations,
   resendInvitation,
-  verifyInviteToken
+  verifyInviteToken,
+  deleteGroup
 }; 

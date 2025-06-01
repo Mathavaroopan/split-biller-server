@@ -6,7 +6,7 @@ const Notification = require('../models/Notification');
 const getUserNotifications = async (req, res) => {
   try {
     const notifications = await Notification.find({ userId: req.user._id })
-      .sort({ timestamp: -1 })
+      .sort({ createdAt: -1 })
       .limit(50); // Limit to most recent 50 notifications
     
     res.json(notifications);
@@ -33,7 +33,7 @@ const markNotificationsAsRead = async (req, res) => {
         _id: { $in: notificationIds },
         userId: req.user._id // Ensure user can only mark their own notifications
       },
-      { read: true }
+      { isRead: true }
     );
     
     res.json({ message: 'Notifications marked as read' });
@@ -50,8 +50,8 @@ const markAllNotificationsAsRead = async (req, res) => {
   try {
     // Mark all user's notifications as read
     await Notification.updateMany(
-      { userId: req.user._id, read: false },
-      { read: true }
+      { userId: req.user._id, isRead: false },
+      { isRead: true }
     );
     
     res.json({ message: 'All notifications marked as read' });

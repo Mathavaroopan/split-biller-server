@@ -7,10 +7,10 @@ const { generateToken } = require('../utils/generateToken');
 // @access  Public
 const registerUser = async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, username, email, phone, password } = req.body;
 
     // Check if all fields are provided
-    if (!name || !email || !phone || !password) {
+    if (!name || !username || !email || !phone || !password) {
       return res.status(400).json({ message: 'Please provide all required fields' });
     }
 
@@ -19,6 +19,17 @@ const registerUser = async (req, res) => {
     if (userExists) {
       return res.status(400).json({ message: 'User already exists' });
     }
+    
+    // Check if username is valid (only alphanumeric and underscore)
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+      return res.status(400).json({ message: 'Username can only contain letters, numbers, and underscores' });
+    }
+    
+    // Check if username already exists
+    const usernameExists = await User.findOne({ username });
+    if (usernameExists) {
+      return res.status(400).json({ message: 'Username is already taken' });
+    }
 
     // Hash password
     const salt = await bcrypt.genSalt(10);
@@ -26,6 +37,7 @@ const registerUser = async (req, res) => {
 
     // Create user
     const user = await User.create({
+      username,
       name,
       email,
       phone,
@@ -35,6 +47,7 @@ const registerUser = async (req, res) => {
     if (user) {
       res.status(201).json({
         _id: user._id,
+        username: user.username,
         name: user.name,
         email: user.email,
         phone: user.phone,
@@ -68,6 +81,7 @@ const loginUser = async (req, res) => {
     if (user && (await bcrypt.compare(password, user.passwordHash))) {
       res.json({
         _id: user._id,
+        username: user.username,
         name: user.name,
         email: user.email,
         phone: user.phone,
@@ -100,4 +114,71 @@ const getUserProfile = async (req, res) => {
   }
 };
 
-module.exports = { registerUser, loginUser, getUserProfile }; 
+// @desc    Update user profile
+// @route   PUT /api/auth/me
+// @access  Private
+const updateUserProfile = async (req, res) => {
+  try {
+    const { username, name, email, phone, password } = req.body;
+    
+    // Find the user
+    const user = await User.findById(req.user._id);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Update fields
+    if (username) {
+      // Check if username is valid (only alphanumeric and underscore)
+      if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        return res.status(400).json({ message: 'Username can only contain letters, numbers, and underscores' });
+      }
+      
+      // Check if username is already taken by another user
+      const existingUser = await User.findOne({ username });
+      if (existingUser && existingUser._id.toString() !== req.user._id.toString()) {
+        return res.status(400).json({ message: 'Username is already taken' });
+      }
+      user.username = username;
+    }
+    
+    if (name) {
+      user.name = name;
+    }
+    
+    if (email) {
+      // Check if email is already taken by another user
+      const existingUser = await User.findOne({ email });
+      if (existingUser && existingUser._id.toString() !== req.user._id.toString()) {
+        return res.status(400).json({ message: 'Email is already in use' });
+      }
+      user.email = email;
+    }
+    if (phone) user.phone = phone;
+    
+    // Update password if provided
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      user.passwordHash = await bcrypt.hash(password, salt);
+    }
+    
+    // Save the updated user
+    const updatedUser = await user.save();
+    
+    // Return updated user data
+    res.json({
+      _id: updatedUser._id,
+      username: updatedUser.username,
+      name: updatedUser.name,
+      email: updatedUser.email,
+      phone: updatedUser.phone,
+      token: generateToken(updatedUser._id),
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = { registerUser, loginUser, getUserProfile, updateUserProfile }; 

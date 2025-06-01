@@ -8,7 +8,8 @@ const {
   joinGroup,
   getGroupInvitations,
   resendInvitation,
-  verifyInviteToken
+  verifyInviteToken,
+  deleteGroup
 } = require('../controllers/groupController');
 const { getGroupExpenses } = require('../controllers/expenseController');
 const { protect } = require('../middleware/auth');
@@ -27,6 +28,7 @@ router.get('/verify-invite/:token', verifyInviteToken);
 router.get('/:id', protect, getGroupDetails);
 router.post('/:id/invite', protect, inviteUserToGroup);
 router.get('/:id/expenses', protect, getGroupExpenses);
+router.delete('/:id', protect, deleteGroup);
 
 // New invitation related routes
 router.get('/:id/invitations', protect, getGroupInvitations);
